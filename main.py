@@ -8,9 +8,9 @@ import sys
 import os
 import importlib
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot, Dispatcher, F
 from aiogram.types import Message
-from aiogram.filters import Command
+from aiogram.client.bot import DefaultBotProperties
 
 # Добавляем загрузку переменных окружения из .env
 from dotenv import load_dotenv
@@ -96,7 +96,10 @@ def load_plugins(plugin_manager: PluginManager):
 # --------------------- Класс бота на aiogram3 ---------------------
 class AITelegramBot:
     def __init__(self, token: str):
-        self.bot = Bot(token=token, parse_mode="HTML")
+        self.bot = Bot(
+            token=token,
+            default=DefaultBotProperties(parse_mode="HTML")
+        )
         self.dp = Dispatcher()
 
         # Инициализируем менеджер плагинов
@@ -105,7 +108,7 @@ class AITelegramBot:
         load_plugins(self.plugin_manager)
 
         # Регистрируем хендлер для команд
-        @self.dp.message(Command())
+        @self.dp.message(F.text.startswith("/"))
         async def command_handler(message: Message):
             full_text = message.text
             parts = full_text.strip().split(maxsplit=1)
