@@ -114,14 +114,22 @@ class AITelegramBot:
             parts = full_text.strip().split(maxsplit=1)
             cmd = parts[0].replace("/", "").lower()
             args = parts[1] if len(parts) > 1 else ""
+            
+            # Особая обработка команды help
+            if cmd == "help":
+                commands = self.plugin_manager.get_available_commands()
+                help_text = "Доступные команды:\n" + "\n".join(f"/{cmd}" for cmd in commands)
+                await message.answer(help_text)
+                return
+
+            # Обработка команды через соответствующий плагин
             result = await self.plugin_manager.handle_command(cmd, args, message)
             if result:
                 await message.answer(result)
 
-        # Регистрируем хендлер для простых сообщений (без команды).
+        # Регистрируем хендлер для простых сообщений (без команды)
         @self.dp.message()
         async def text_handler(message: Message):
-            # Место, где можно интегрировать AI (ChatGPT и т.п.)
             user_text = message.text
             await message.answer(f"AI-ответ (пока эхо): {user_text}")
 
