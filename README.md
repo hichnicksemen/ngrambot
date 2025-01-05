@@ -91,7 +91,7 @@ ngrambot/
 
 - requirements.txt — список зависимостей (aiogram, python-dotenv, openai и т.д.).
 
-## Как добавить новый плагин
+## Как добавить агента
 
 1. Создайте в папке agents новый файл, например my_new_agent.py
 
