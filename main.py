@@ -19,7 +19,10 @@ from aiogram.client.bot import DefaultBotProperties
 from dotenv import load_dotenv
 
 # Загружаем переменные окружения из файла .env, если он существует
-load_dotenv()
+load_dotenv(os.path.join(os.path.dirname(__file__), '.env'))
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # Папки с плагинами и инструментами
 AGENTS_FOLDER = os.path.join(os.path.dirname(__file__), 'agents')
@@ -169,49 +172,292 @@ class AITelegramBot:
 
         # Системное сообщение для GPT, включая информацию о доступных агентах
         self.system_prompt = (
-            "Ты — GPT-бот, способный общаться с пользователями и выполнять различные задачи с помощью агентов.\n\n"
-            "Доступные агенты:\n" +
-            "\n".join([f"/{agent['name']} — {agent['description']}" for agent in agents_info]) +
+            "Ты — GPT-бот, который не только объясняет свои действия, но и полностью выполняет поставленные задачи. "
+            "Используй ReAct подход (Reasoning + Acting) для решения задач.\n\n"
+            "Правила работы с агентами:\n"
+            "1. Сначала планируй полный набор действий\n"
+            "2. Выполняй ВСЕ запланированные действия через agent_calls\n"
+            "3. Анализируй результаты КАЖДОГО действия\n"
+            "4. Продолжай выполнение, пока задача не будет полностью решена\n"
+            "5. Формируй итоговый ответ на основе ВСЕХ полученных результатов\n\n"
+            "При ответе строго следуй формату:\n"
+            "Thought: детальное планирование всех необходимых действий\n"
+            "Action: вызов первого агента\n"
+            "Observation: анализ результата\n"
+            "Thought: планирование следующего действия\n"
+            "Action: вызов следующего агента\n"
+            "Observation: анализ результата\n"
+            "... (повторяй для каждого необходимого действия)\n"
+            "Final Response: полный ответ, объединяющий все результаты\n\n"
+            f"Доступные агенты:\n" +
+            "\n".join([f"{agent['name']} — {agent['description']}" for agent in agents_info]) +
             "\n\n"
-            "При необходимости используй агентов для выполнения задач. Ответь в формате JSON следующей структуры:\n"
+            "Пример правильного ответа в JSON:\n"
             "{\n"
-            '  "response": "Текст ответа GPT",\n'
+            '  "reasoning": "Thought: Нужно узнать погоду и время\\n'\
+            'Action: Вызываю weather для погоды\\n'\
+            'Observation: Получены данные о погоде\\n'\
+            'Action: Обрабатываю время\\n'\
+            'Final Response: Объединяю информацию",\n'
+            '  "response": "Сейчас [время] и [погода]",\n'
             '  "agent_calls": [\n'
-            '    {\n'
-            '      "agent": "название_агента",\n'
-            '      "args": "аргументы"\n'
-            '    }\n'
-            '  ]\n'
+            '    {"agent": "weather", "args": "Moscow"},\n'
+            '    {"agent": "time", "args": "+2 hours"}\n'
+            "  ]\n"
             "}\n\n"
-            "Если не требуется вызывать агента, верни только поле 'response'."
+            "ВАЖНО:\n"
+            "1. ВСЕГДА выполняй действия через agent_calls\n"
+            "2. Не просто планируй, а реально ВЫЗЫВАЙ агентов\n"
+            "3. Используй все необходимые агенты для полного решения задачи\n"
+            "4. Объединяй результаты всех агентов в финальном ответе"
         )
 
-        # Регистрируем хендлер для сообщений
         @self.dp.message()
         async def message_handler(message: Message):
-            user_text = message.text
-            ai_response = await self.get_ai_response(user_text)
-            final_response = ""
+            if not message.text:
+                return
 
-            try:
-                response_data = json.loads(ai_response)
-                final_response += response_data.get("response", "")
-                agent_calls = response_data.get("agent_calls", [])
+            if message.text.startswith('/'):
+                # Remove leading slash and split command
+                command_full = message.text[1:].split(maxsplit=1)
+                command_parts = command_full[0].split('_')  # Split by underscore for subcommands
+                base_command = command_parts[0].lower()  # Get base command (e.g., 'memory' from 'memory_get')
+                
+                # Prepare args: if there's a subcommand, add it to the beginning of args
+                args = ""
+                if len(command_parts) > 1:
+                    args = command_parts[1]  # Add subcommand to args
+                    if len(command_full) > 1:
+                        args += " " + command_full[1]
+                elif len(command_full) > 1:
+                    args = command_full[1]
+                
+                # Try to find and execute the base command
+                agent = self.agent_manager.command_map.get(base_command)
+                if agent:
+                    agent_response = await agent.handle(args, message)
+                    await message.answer(agent_response)
+                    return
+                else:
+                    await message.answer(f"Неизвестная команда: /{base_command}")
+                    return
 
-                for call in agent_calls:
-                    agent_name = call.get("agent")
-                    args = call.get("args", "")
-                    agent = self.agent_manager.command_map.get(agent_name.lower())
-                    if agent:
-                        agent_response = await agent.handle(args, message)
-                        final_response += f"\n\nАгент /{agent_name} ответил:\n{agent_response}"
-                    else:
-                        final_response += f"\n\nНеизвестный агент: /{agent_name}"
-            except json.JSONDecodeError:
-                # Если ответ не в формате JSON, просто отправляем как есть
-                final_response = ai_response
-
+            # Запускаем цикл ReAct
+            final_response = await self.execute_react_cycle(message.text, message)
             await message.answer(final_response)
+
+    async def execute_react_cycle(
+        self,
+        user_message: str,
+        message,
+        context: Dict[str, Any] = None,
+        iteration_count: int = 0,
+        max_iterations: int = 5
+    ) -> str:
+        if context is None:
+            context = {}
+
+        if iteration_count >= max_iterations:
+            logger.warning("Достигнут лимит итераций для ReAct цикла!")
+            context["error"] = "Достигнут лимит итераций"
+            return await self.get_final_response(user_message, context)
+
+        calls_history = context.setdefault("calls_history", [])
+        progress_history = context.setdefault("progress_history", [])
+        
+        logger.debug(f"===== ИТЕРАЦИЯ #{iteration_count} =====")
+        logger.debug(f"Текущий контекст:\n{context}")
+
+        # Формируем сообщение для модели с контекстом и прогрессом
+        full_message = self.format_message_with_context(user_message, context)
+        ai_response = await self.get_ai_response(full_message)
+
+        try:
+            response_data = json.loads(ai_response)
+        except json.JSONDecodeError as e:
+            context["error"] = f"Ошибка парсинга JSON: {str(e)}"
+            return await self.execute_react_cycle(user_message, message, context, iteration_count + 1)
+
+        # Получаем текущие вызовы агентов
+        agent_calls = response_data.get("agent_calls", [])
+        calls_history.append(agent_calls)
+
+        # Выполняем вызовы агентов и собираем результаты
+        agent_results = await self.execute_agent_calls(agent_calls, message)
+        
+        # Анализируем прогресс
+        progress = self.analyze_progress(context, agent_results, response_data)
+        progress_history.append(progress)
+
+        # Обновляем контекст результатами
+        context.update(agent_results)
+
+        # Если все агенты выполнились успешно, формируем финальный ответ
+        if progress.get("success", False):
+            final_response = []
+            
+            # Добавляем рассуждения
+            if "reasoning" in response_data:
+                reasoning = response_data["reasoning"].replace(
+                    "Thought:", "💭 Размышление:"
+                ).replace(
+                    "Action:", "⚡️ Действие:"
+                ).replace(
+                    "Observation:", "👁 Наблюдение:"
+                ).replace(
+                    "Final Response:", "✅ Итоговый ответ:"
+                )
+                final_response.append("🤖 Процесс решения:\n" + reasoning)
+
+            # Добавляем результаты агентов
+            if "response" in response_data:
+                response_text = response_data["response"]
+                # Заменяем плейсхолдеры результатами агентов
+                for agent_name, result in progress.get("results", {}).items():
+                    if not isinstance(result, str) or result.startswith("❌"):
+                        continue
+                    placeholder = f"[{agent_name}]"
+                    if placeholder in response_text:
+                        response_text = response_text.replace(placeholder, result)
+                final_response.append("\n🎯 Итоговый результат: " + response_text)
+            else:
+                # Если нет response в JSON, формируем из результатов агентов
+                results = [result for result in agent_results.values() 
+                          if isinstance(result, str) and not result.startswith("❌")]
+                if results:
+                    final_response.append("\n🎯 Полученные результаты:\n" + "\n".join(results))
+
+            # Возвращаем полный ответ
+            return "\n".join(final_response)
+
+        # Если есть ошибки или не все агенты выполнились, продолжаем цикл
+        if agent_results or "error" in context:
+            return await self.execute_react_cycle(user_message, message, context, iteration_count + 1)
+
+        return self.format_final_response(response_data)
+
+    async def execute_agent_calls(self, agent_calls: List[Dict[str, str]], message: Message) -> Dict[str, str]:
+        """
+        Выполняет вызовы агентов и возвращает словарь с результатами.
+        """
+        results = {}
+        for call in agent_calls:
+            agent_name = call.get("agent", "").lower().lstrip("/")
+            args = call.get("args", "").lstrip("/")
+
+            # Если это повторный вызов того же агента с теми же аргументами, пропускаем
+            call_key = f"{agent_name}:{args}"
+            if call_key in results:
+                logger.info(f"Пропускаем дублирующий вызов: {call_key}")
+                continue
+
+            agent = self.agent_manager.command_map.get(agent_name)
+            if agent:
+                try:
+                    logger.info(f"Вызов агента '{agent_name}' с аргументами: {args}")
+                    result = await agent.handle(args, message)
+                    results[agent_name] = result  # Сохраняем по имени агента
+                    logger.info(f"Агент '{agent_name}' вернул результат: {result}")
+                except Exception as e:
+                    error_msg = f"Ошибка при вызове агента {agent_name}: {str(e)}"
+                    logger.error(error_msg)
+                    results[f"{agent_name}_error"] = error_msg
+            else:
+                logger.error(f"Агент '{agent_name}' не найден")
+                results[f"{agent_name}_error"] = f"Агент '{agent_name}' не найден"
+
+        return results
+
+    def analyze_progress(self, context: Dict[str, Any], new_results: Dict[str, Any], response_data: Dict[str, Any]) -> Dict[str, Any]:
+        """Анализирует прогресс в решении задачи"""
+        # Подсчитываем успешные и неуспешные вызовы
+        successful_calls = sum(1 for result in new_results.values() 
+                             if isinstance(result, str) and not result.startswith("❌"))
+        failed_calls = sum(1 for result in new_results.values() 
+                         if isinstance(result, str) and result.startswith("❌"))
+        
+        # Проверяем успешность выполнения всей задачи
+        all_calls_processed = len(response_data.get("agent_calls", [])) == len(new_results)
+        success = successful_calls > 0 and failed_calls == 0 and all_calls_processed
+
+        return {
+            "has_new_info": bool(new_results),
+            "error_resolved": "error" in context and "error" not in new_results,
+            "reasoning_changed": self.has_reasoning_changed(context, response_data),
+            "agent_calls_count": len(response_data.get("agent_calls", [])),
+            "successful_calls": successful_calls,
+            "failed_calls": failed_calls,
+            "success": success,
+            "results": new_results  # Сохраняем результаты для использования в финальном ответе
+        }
+
+    def is_stuck(self, progress_history: List[Dict[str, Any]]) -> bool:
+        """
+        Определяет, застряло ли выполнение, анализируя историю прогресса
+        """
+        if len(progress_history) < 3:
+            return False
+
+        last_three = progress_history[-3:]
+        
+        # Проверяем наличие новой информации
+        no_new_info = not any(p["has_new_info"] for p in last_three)
+        
+        # Проверяем изменения в рассуждениях
+        no_reasoning_changes = not any(p["reasoning_changed"] for p in last_three)
+        
+        # Проверяем количество вызовов агентов
+        same_calls_count = all(p["agent_calls_count"] == last_three[0]["agent_calls_count"] 
+                             for p in last_three)
+
+        return no_new_info and no_reasoning_changes and same_calls_count
+
+    def has_reasoning_changed(self, context: Dict[str, Any], new_response: Dict[str, Any]) -> bool:
+        """
+        Проверяет, изменились ли рассуждения LLM по сравнению с предыдущей итерацией
+        """
+        if "last_reasoning" not in context:
+            context["last_reasoning"] = new_response.get("reasoning", "")
+            return True
+
+        old_reasoning = context["last_reasoning"]
+        new_reasoning = new_response.get("reasoning", "")
+        context["last_reasoning"] = new_reasoning
+
+        # Простое сравнение на неравенство
+        return old_reasoning != new_reasoning
+
+    async def get_final_response(self, user_message: str, context: Dict[str, Any]) -> str:
+        """
+        Запрашивает у LLM финальный ответ с учетом всего контекста
+        """
+        full_context = json.dumps(context, ensure_ascii=False, indent=2)
+        final_prompt = (
+            f"Задача: {user_message}\n\n"
+            f"Контекст выполнения:\n{full_context}\n\n"
+            "Пожалуйста, сформируй финальный ответ, учитывая все полученные результаты и ошибки."
+        )
+        return await self.get_ai_response(final_prompt)
+
+    def format_message_with_context(self, user_message: str, context: Dict[str, Any]) -> str:
+        """
+        Форматирует сообщение для LLM с учетом контекста
+        """
+        message_parts = [user_message]
+
+        filtered_context = {k: v for k, v in context.items() 
+                          if k not in ["calls_history", "progress_history", "last_reasoning"]}
+        
+        if (filtered_context):
+            message_parts.append("\nПредыдущие результаты:")
+            for agent_name, result in filtered_context.items():
+                if agent_name != "error":
+                    message_parts.append(f"\nРезультат от {agent_name}:\n{result}")
+
+        if "error" in context:
+            message_parts.append(f"\nПредыдущая ошибка:\n{context['error']}")
+
+        return "\n".join(message_parts)
 
     async def get_ai_response(self, user_message: str) -> str:
         """
@@ -250,6 +496,41 @@ class AITelegramBot:
         except Exception as e:
             logging.error(f"Ошибка при обращении к GPT: {e}")
             return "Произошла ошибка при обработке вашего запроса."
+
+    def format_final_response(self, response_data: Dict[str, Any]) -> str:
+        """Форматирует финальный ответ из данных ответа GPT."""
+        if isinstance(response_data, str):
+            return response_data
+
+        if isinstance(response_data, dict):
+            parts = []
+            
+            # Добавляем рассуждения
+            if "reasoning" in response_data:
+                reasoning = response_data["reasoning"]
+                if not any(marker in reasoning for marker in ["Observation:", "Action:", "Final Response:"]):
+                    return "❌ Требуется выполнение действий через агентов"
+                
+                formatted_reasoning = (
+                    reasoning
+                    .replace("Thought:", "💭 Размышление:")
+                    .replace("Action:", "⚡️ Действие:")
+                    .replace("Observation:", "👁 Наблюдение:")
+                    .replace("Final Response:", "✅ Итоговый ответ:")
+                )
+                parts.append("🤖 Процесс решения:\n" + formatted_reasoning)
+            
+            # Проверяем наличие вызовов агентов
+            if not response_data.get("agent_calls"):
+                return "❌ Отсутствуют вызовы агентов для выполнения задачи"
+            
+            # Добавляем финальный ответ
+            if "response" in response_data:
+                parts.append("\n🎯 Результат: " + response_data["response"])
+            
+            return "\n".join(parts)
+
+        return "Произошла ошибка при обработке ответа."
 
     async def run(self):
         # Запускаем бота (long-polling)

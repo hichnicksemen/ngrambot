@@ -1,6 +1,7 @@
 # agents/weather_agent.py
 
 import os
+import logging
 from agents.base_agent import BaseAgent
 from aiogram.types import Message
 from typing import Dict, Any
@@ -12,9 +13,10 @@ class WeatherAgent(BaseAgent):
 
     def __init__(self, tools: Dict[str, Any]):
         super().__init__(tools)
-        self.api_key = os.getenv("OPENWEATHER_API_KEY")
+        self.api_key = os.getenv("WEATHER_API_KEY")
         if not self.api_key:
-            raise ValueError("Переменная окружения OPENWEATHER_API_KEY не установлена!")
+            logging.error("Переменная окружения WEATHER_API_KEY не установлена!")
+            raise ValueError("Переменная окружения WEATHER_API_KEY не установлена!")
 
     def get_name(self) -> str:
         return "weather"
